@@ -62,7 +62,7 @@ SR_dge$samples$patientID <- as.factor(pID)
 SR_dge$samples$treat <- as.factor(treat)
 
 #Make design matrix
-designo <- model.matrix(~patientID + treat, data = SR_dge$samples)
+designo <- model.matrix(~-1 + patientID + treat, data = SR_dge$samples)
 
 #######################
 #VOOM VOOM VOOM 
