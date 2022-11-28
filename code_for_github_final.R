@@ -1,125 +1,133 @@
-##########################################
-#BASIC FILTER/data cleaning and factor declaration
-library(BiocManager)
-library(Biobase)
-library(BiocGenerics)
-library(dplyr)
-library(data.table)
-library(edgeR)
-library(limma)
+# Final R Code for the Re-infection article 
 
-#Read the published data
-reinfectionSR <- as.matrix(fread("GSE206397_countsAll.txt"),
-                           rownames=1)
+# Load Libraries ####################################
+suppressPackageStartupMessages(library(dplyr) )
+suppressPackageStartupMessages(library(assertthat)) 
+suppressPackageStartupMessages(library(Biobase) ) 
+suppressPackageStartupMessages(library(limma) ) 
+suppressPackageStartupMessages(library(edgeR) )
+suppressPackageStartupMessages(library(openxlsx) ) 
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(sva))
+suppressPackageStartupMessages(library(edgeR))
+suppressPackageStartupMessages(library(biomaRt))
+suppressPackageStartupMessages(library(fgsea))
+suppressPackageStartupMessages(library(Rcpp))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(ggbiplot))
+suppressPackageStartupMessages(library(factoextra))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(ComplexHeatmap))
+suppressPackageStartupMessages(library(qusage))
+suppressPackageStartupMessages(library(BiocGenerics))
+suppressPackageStartupMessages(library(matrixStats)) 
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(circlize))
 
-#samples to keep - those who were reinfected only !@!
-idx_keep <- c(4:7, 9:12, 16:19, 20:23, 24:27, 28:30, 34:37)
 
-reinfectionSR <- reinfectionSR[,idx_keep]
-#Function for basic filtering 
-dgeWay <- function(count_mat){
-  library(edgeR)
-  
-  dgee <- DGEList(count_mat)
-  #dgee$samples$lib.size <- colSums(dgee$counts)
-  #dgee <- calcNormFactors(dgee)
-  keep <- rowSums(cpm(dgee) > 1) >= 3
-  dgee <- dgee[keep, ,keep.lib.sizes = FALSE]
-  
-  dgee$samples$lib.size <- colSums(dgee$counts)
-  dgee <- calcNormFactors(dgee)
-  
-  return(dgee)
-}
-##
 
-SR_dge <- dgeWay(reinfectionSR %>% as.matrix)
+# END ##############################################################################################################################################################################################
 
-#FACTOR DECLERATION
-####################
-pID <- c(rep("SR1",4), rep("SR2",4), rep("SR3",4), rep("SR5",4), rep("SR6",4),
-         rep("SR7",3), rep("SR",4))
+# Data Normalisation ##################################################################################################
 
-casetime <- c(rep(c("NI","EA","LA","FU"),5), "NI","EA","LA",
-              "NI","EA","LA","FU") %>% as.factor()
+#Enter here directory with your data::
+load("C:/Users/User/Downloads/eset.Rdata")
 
-viremia <- c("min","plus","min","min",
-             "min","plus","min","min",
-             "min","plus","plus","min",
-             "min","plus","min","min",
-             "min","plus","min","min",
-             "min","plus","plus",
-             "min","plus","min","min") 
+dgeList <- DGEList(counts = exprs(esetRaw))
+# of Ge that zero counts across all samples
+table(rowSums(dgeList$counts==0)==ncol(dgeList$counts))
 
-viremia <- factor(viremia, levels = c("min", "plus"))
-casetime <- factor(casetime, levels = c("NI", "EA", "LA", "FU"))
+# Remove any ge that are expressed at levels less than 1 CPM in less than 3 samples
+cpm.dgeList <- cpm(dgeList)
+keep.exprs  <- rowSums(cpm.dgeList>1)>=3
+dgeList     <- dgeList[keep.exprs,, keep.lib.sizes=FALSE]
+rm(cpm.dgeList, keep.exprs)
 
-treat <- paste(casetime, viremia, sep = "_") 
-treat <- factor(treat, levels = c("NI_min","EA_plus","LA_min","LA_plus","FU_min"))
+# Norm 
+dgeList <- edgeR::calcNormFactors(dgeList)
+FC=factor(pData(esetRaw)$CClass,levels=unique(pData(esetRaw)$CClass))
+blo=factor(pData(esetRaw)$"Patient.ID")
+design=model.matrix(~-1+blo+FC)
+vAll=voom(dgeList,design=design,plot=FALSE) 
+rownames(vAll$weights)=rownames(vAll$E)
+colnames(vAll$weights)=colnames(vAll$E)
+fdataN=fData(esetRaw)[rownames(vAll$E),]
+fdataN=fData(esetRaw)[rownames(vAll$E),]
+phenoData   <- new("AnnotatedDataFrame", data = pData(esetRaw))
+featureData <- new("AnnotatedDataFrame", data =fdataN)
 
-#Put it into the dge object for design matrix and downstream analysis
-SR_dge$samples$patientID <- as.factor(pID)
-SR_dge$samples$treat <- as.factor(treat)
+#remove batch effect of different sequencing times
+batch=pData(esetRaw)$Sequencing.Batch
 
-#Make design matrix
-designo <- model.matrix(~-1 + patientID + treat, data = SR_dge$samples)
+mm=sva::ComBat(vAll$E,batch=as.character(batch))
+esetNorm <- ExpressionSet(assayData = mm,
+                          phenoData = phenoData,featureData=featureData)
 
-#######################
-#VOOM VOOM VOOM 
-#######################
-library(limma)
-library(Matrix)
-library(lme4)
-library(zoo)
-library(multcomp)
-library(MASS)
-library(broom)
-library(sva)
+# END ############################################################################################################################################################################################ 
 
-patientID <- SR_dge$samples$patientID 
-treat <- SR_dge$samples$treat
+# Figure 1B | PCA ##################
 
-#use weights from voom for building the mixed weighted linear model::
-vSR <- voom(SR_dge, design = designo, plot = TRUE)
+exprs.set<-exprs(esetNorm)
+pheno.all<-pData(esetNorm)
 
-#################
-#PCA PCA PCA
-library(ggplot2)
-library(factoextra)
-#################
-batcho <- c(rep("Old",8), rep("New",15), rep("Old",4))
+View(pheno.all)
+# Samples of interests
 
-# Remove sequencing batch effect:
-noSeqBatch <- removeBatchEffect(vSR$E, 
-                     batch = batcho)
+# Resolvers Secondary Infection
+resII <- c("SR1.4", "SR1.5", "SR1.6", "SR1.7", 
+           "SR2.2","SR2.3","SR2.4","SR2.5", 
+           "SR3.4", "SR3.5", "SR3.6", "SR3.7",
+           "SR5.1", "SR5.2", "SR5.3", "SR5.4",  
+           "SR6.1", "SR6.2", "SR6.3", "SR6.4", 
+           "SR7.1", "SR7.2","SR7.3",
+           "CI1.4", "CI1.5", "CI1.6", "CI1.7")
 
-# Remove patientID batch effect
-expr.set <- removeBatchEffect(noSeqBatch, 
-                              batch = pID)
+expr.set <- exprs.set[,resII]
+pheno <- pheno.all[resII,]
+
+pheno$Class <- c("Pre-reinfection", "Early acute (+)", "Late acute (-)", "Follow up",
+                 "Pre-reinfection", "Early acute (-)", "Late acute (-)", "Follow up",
+                 "Pre-reinfection", "Early acute (+)", "Late acute (+)", "Follow up",
+                 "Pre-reinfection", "Early acute (+)", "Late acute (-)", "Follow up",
+                 "Pre-reinfection", "Early acute (+)", "Late acute (-)", "Follow up",
+                 "Pre-reinfection", "Early acute (+)", "Late acute (+)",
+                 "Pre-reinfection", "Early acute (+)", "Late acute (-)", "Follow up")
+
+
+# Remove atientID batch effect
+expr.set <- removeBatchEffect(expr.set, batch = pheno$Patient.ID)
 
 # Select top x most variable genes
+
 num.genes <- 500
 
 rv <- rowVars(expr.set)
 
 select <- order(rv,decreasing=TRUE)[seq_len(num.genes)]
 
-# Plot top x most variable genes
+# Plot top 500 most variable genes
+
 pca <- prcomp(t(expr.set[select,]), scale.=TRUE)
 
+
 p.pca <- ggbiplot(pca,
-                  groups=treat,
+                  groups=pheno$Class,
                   choices=c(1,2),
                   circle=FALSE,
                   ellipse=TRUE,
                   var.axes=FALSE
 )
 
+
+
 # Edit ggbiplot object to make aesthetics work
 p.pca$layers[[1]] <- NULL
 
 p.pca + 
-  geom_point(aes(color= factor(treat), shape=factor(viremia)), size = 4, alpha = 0.8) +
+  geom_point(aes(color= factor(pheno$Class), 
+                 shape=factor(pheno$Viral.load)), 
+             size = 4, alpha = 0.8) +
   ggtitle(label="Top 500 most variable genes (expressed)") +
   theme_bw() +
-  coord_fixed()
+  coord_fixed() 
